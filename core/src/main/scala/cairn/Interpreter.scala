@@ -1,6 +1,7 @@
 package cairn
 
 import zio.*
+import zio.schema.Schema
 
 /**
  * Executes a graph, committing a checkpoint after every [[Node.Effect]] and replaying any that
@@ -10,9 +11,8 @@ import zio.*
  * (CLAUDE.md, "What wraps the graph at run time"); running without persistence is
  * `CheckpointStore.none`, not a second implementation.
  *
- * `Loop`, `Verify` and `Gate` are not wired yet. Reaching one is a defect, not a silent no-op - a
- * `Verify` node that quietly passed would break invariant #5 in the worst possible way, so it dies
- * loudly instead.
+ * `Gate` is not wired yet (Week 5). Reaching it is a defect, not a silent no-op - see
+ * `notYetInterpreted`.
  */
 object Interpreter:
 
@@ -47,13 +47,10 @@ object Interpreter:
         fanOut(n, input, runId, attempt)
 
       case n: Node.Loop[R, E, I, O] =>
-        notYetInterpreted(n.id, "Week 3")
+        iterate(n, input, None, runId, attempt)
 
       case n: Node.Verify[R, E, I, O] =>
-        notYetInterpreted(
-          n.id,
-          "Week 3 - must never silently pass; failing loudly here is deliberate"
-        )
+        verify(n, input, runId, attempt)
 
       case n: Node.Gate[R, E, I, O] =>
         notYetInterpreted(n.id, "Week 5")
@@ -136,6 +133,128 @@ object Interpreter:
                 )
                 .mapError(GraphError.StoreFailed(n.id, _))
             yield result
+        }
+    }
+
+  /**
+   * Fail-closed per CLAUDE.md invariant #5: the only path to success is an explicit `true` from the
+   * judge. A judge whose own effect fails - a rate limit, a timeout, malformed judge output,
+   * anything the judge's `E` carries - is `.mapError`'d into `NodeFailed`, the same as any other
+   * node failure. There is deliberately no `.orElse` or `.catchAll` here: neither appears anywhere
+   * in this method, so there is no code path through which a judge-infrastructure failure can be
+   * converted into a success.
+   *
+   * What this does NOT protect against: a `Judge` implementation that catches its own error
+   * internally and returns `true` from inside `check`. Fail-closed here is a property of the
+   * interpreter's plumbing, not a guarantee about arbitrary `Judge` implementations - see the
+   * dogfooding note about keying on an explicit `VERDICT:` marker rather than a judge's first word,
+   * which is exactly this failure mode one level up, inside a judge rather than inside the
+   * interpreter.
+   *
+   * A judge that dies (a genuine defect - a thrown exception, not a typed `E` failure) is not
+   * caught either. `.mapError` only transforms the `E` channel; a `Cause.Die` propagates through
+   * untouched, same as an unimplemented `Loop`/`Gate` node. Dying is not silently passing.
+   *
+   * No timeout is imposed here. `Node.Verify` has no timeout field, and adding one is an ADT
+   * change, not an interpreter one - undecided, see CLAUDE.md open decisions. A judge that never
+   * completes hangs the run rather than failing closed after some bound, unless the judge's own
+   * implementation imposes a timeout and maps it to a typed `E`.
+   */
+  private def verify[R, E, I, O](
+      n: Node.Verify[R, E, I, O],
+      input: I,
+      runId: RunId,
+      attempt: Attempt
+  ): ZIO[R & CheckpointStore, GraphError[E], O] =
+    for
+      output <- run(n.inner, input, runId, attempt)
+      verdict <- n.judge.check(output).mapError(GraphError.NodeFailed(n.id, _))
+      result <-
+        if verdict then ZIO.succeed(output)
+        else ZIO.fail(GraphError.VerificationFailed(n.id, "judge rejected the output"))
+    yield result
+
+  private val BooleanSchema: Schema[Boolean] = Schema.primitive[Boolean]
+
+  /**
+   * `attempt` is the single counter threaded through the whole `run` call tree; `Loop` is the only
+   * case that changes it. On entry (fresh run or crash resume alike) it always starts at whatever
+   * `attempt` this `Loop` node itself was reached with - never re-derived or reset by the
+   * interpreter - and only this method ever increments it, once per rejection. That is what makes
+   * "crash-retry of attempt N replays" and "loop-retry after a rejection moves to attempt N+1 and
+   * executes" the same code path rather than two: a resumed run re-enters `iterate` at the same
+   * `attempt` it last held, `run(n.body, ...)` and `checkedAccept` both hit their existing
+   * checkpoints and replay for free, and execution only does new work at the first attempt that
+   * never committed - whether that attempt is "new" because of a rejection or "new" because nothing
+   * checkpointed there yet are indistinguishable to this method, deliberately.
+   */
+  private def iterate[R, E, I, O](
+      n: Node.Loop[R, E, I, O],
+      input: I,
+      feedback: Option[Node.Loop.Feedback],
+      runId: RunId,
+      attempt: Attempt
+  ): ZIO[R & CheckpointStore, GraphError[E], O] =
+    for
+      output <- run(n.body, (input, feedback), runId, attempt)
+      verdict <- checkedAccept(n, output, runId, attempt)
+      result <-
+        if verdict then ZIO.succeed(output)
+        else if attempt.next.value >= n.max then ZIO.fail(GraphError.Exhausted(n.id, n.max))
+        else
+          iterate(
+            n,
+            input,
+            Some(Node.Loop.Feedback(s"attempt ${attempt.value} rejected")),
+            runId,
+            attempt.next
+          )
+    yield result
+
+  /**
+   * `accept`'s verdict, checkpointed under a derived id so a resumed loop does not re-run an
+   * expensive validation any more than it re-runs `body` - see the `Loop` doc comment. Same shape
+   * as [[effect]]: check for an existing checkpoint first, run and commit only on a miss. A failure
+   * from `accept` itself carries the *loop's* id, not the derived one - `n.id`, matching how
+   * `verify`'s judge failures carry the `Verify` node's id rather than `inner`'s.
+   */
+  private def checkedAccept[R, E, I, O](
+      n: Node.Loop[R, E, I, O],
+      output: O,
+      runId: RunId,
+      attempt: Attempt
+  ): ZIO[R & CheckpointStore, GraphError[E], Boolean] =
+    ZIO.serviceWithZIO[CheckpointStore] { store =>
+      val acceptId = NodeId(s"${n.id.value}/accept")
+      store
+        .get(runId, acceptId, attempt)
+        .mapError(GraphError.StoreFailed(acceptId, _))
+        .flatMap {
+          case Some(committed) =>
+            ZIO
+              .fromEither(BooleanSchema.fromDynamic(committed.value))
+              .mapError(reason =>
+                GraphError.StoreFailed(acceptId, StoreError.DecodeFailed(runId, acceptId, reason))
+              )
+
+          case None =>
+            for
+              verdict <- n.accept(output).mapError(GraphError.NodeFailed(n.id, _))
+              now <- Clock.instant
+              _ <- store
+                .commit(
+                  Checkpoint(
+                    runId = runId,
+                    nodeId = acceptId,
+                    attempt = attempt,
+                    value = BooleanSchema.toDynamic(verdict),
+                    cost = None,
+                    tokens = None,
+                    committedAt = now
+                  )
+                )
+                .mapError(GraphError.StoreFailed(acceptId, _))
+            yield verdict
         }
     }
 

@@ -60,10 +60,21 @@ object Node:
 
   /**
    * Propose, validate, retry up to `max` attempts, feeding the failure back into the next attempt.
-   * Exhaustion surfaces as `GraphError.Exhausted`.
+   * Exhaustion surfaces as `GraphError.Exhausted`. `attempt` is the same counter threaded through
+   * every other node - `Loop` is simply the only case that advances it, incrementing by one per
+   * rejection and leaving it untouched on every other path. See `Interpreter.iterate`.
    *
-   * TODO(week 3): `Feedback` is a placeholder. It should carry whatever the `accept` step wants the
-   * next attempt to see — not yet designed.
+   * `accept`'s verdict is checkpointed under a derived id (`"<loopId>/accept"`), same `attempt`,
+   * honoring the commitment in `Ids.scala`'s `Attempt` doc comment - a resumed loop does not re-run
+   * an expensive validation any more than it re-runs `body`.
+   *
+   * OPEN: `accept: O => ZIO[R, E, Boolean]` has no channel to explain *why* it rejected - only
+   * whether. `Interpreter.iterate` therefore synthesizes a generic
+   * `Feedback(s"attempt N rejected")` on retry, which carries no information about what was wrong
+   * with attempt N. Real validation-failure content (what the README's repair-loop scenario
+   * actually needs) requires widening `accept`'s signature - e.g. to
+   * `O => ZIO[R, E, Either[Feedback, Unit]]` - which is a change to an existing case, not done
+   * without asking. Until that's decided, `Feedback` is present in the type but empty in practice.
    */
   final case class Loop[R, E, I, O](
       id: NodeId,
@@ -81,9 +92,15 @@ object Node:
   /**
    * Wraps `inner`; `judge` must return an explicit pass for the run to continue. Fail-closed per
    * CLAUDE.md invariant #5 — there is no path to success that skips this check.
+   * `Interpreter.verify` enforces this with a plain `if verdict then succeed else fail`, not a fold
+   * that could quietly treat a judge failure as a pass; see that method's doc comment for exactly
+   * what does and does not fail closed (a dying judge, a judge with no timeout).
    *
-   * TODO(week 3): `Judge` is a placeholder pending the verification design (fresh-context
-   * re-invocation vs. a plain code check).
+   * OPEN: the judge's verdict is not checkpointed anywhere - only `inner`'s output is, and only if
+   * `inner` is an `Effect`. A crash after this node has already passed replays `inner` for free on
+   * resume but re-invokes `judge` from scratch every time, unconditionally. That is a real cost,
+   * not just a correctness footnote, for exactly the fresh-context second-model-call judge this
+   * library is built around. See CLAUDE.md, "Open decisions".
    */
   final case class Verify[R, E, I, O](
       id: NodeId,
