@@ -241,6 +241,9 @@ Violations of these are review-blocking regardless of how the code reads.
 6. `Suspended` holds no fiber, no thread and no memory. State is on disk.
 7. Prefer a deterministic code verifier over an LLM judge wherever the check can
    be expressed in Scala.
+8. Cost aggregation is store summation, never live FiberRef propagation. This
+   holds only because every `Node.Effect` execution clears its `Cost.ref` via
+   `locally`, without exception — see `Cost.scala`.
 
 ## Test strategy
 
@@ -320,3 +323,40 @@ sbt testAll       unit + integration (needs Docker)
 sbt testFast      unit only, offline, no Docker
 sbt docs/mdoc     build and typecheck documentation
 ```
+
+## Open decisions
+
+Recorded at the code that would change, not just here.
+
+- **Blob-sized checkpoint values.** `Checkpoint.value` is stored inline with no
+  size cap; a 40-page PDF extraction puts tens of megabytes in a Postgres row.
+  The alternative spills past a threshold to blob storage. Deciding later is a
+  store migration, so settle it before Week 4.
+- **Node id collisions.** Ids are not path-qualified, so a sub-graph used twice,
+  or two fan-out branches sharing a name, collide in the store and replay each
+  other's output. Fix is to key on a path; it changes the store schema, so it
+  pairs with the blob decision.
+- **Fan-out failure mode.** `foreachPar` is fail-fast: one branch failing
+  interrupts its siblings, discarding LLM calls already paid for and leaving a
+  partially checkpointed fan-out. Safe on resume, not free. The alternative is
+  to let all branches finish and collect failures. One call site either way.
+- **Spend on a failed node is not recorded anywhere.** `Interpreter.effect`
+  reads back a node's accumulated `Cost.ref` regardless of whether the body
+  succeeded or failed, but only a successful node produces a `Checkpoint` to
+  attach that spend to — there is no checkpoint for a node that failed. A
+  malformed LLM reply that billed real tokens and then failed to parse leaves
+  no trace. Same category as the other two: the honest fix is probably a
+  lightweight "attempt record" distinct from a `Checkpoint`, which is a store
+  schema decision. Decide before `store-postgres`.
+- **`Spend` accumulation assumes single-currency pricing.** `Spend.+` sums
+  `Option[Money]` via `Money.+`, which `require`s matching currencies and
+  throws `IllegalArgumentException` — a bare `Throwable`, not a `GraphError` —
+  on mismatch. That `require` fires inside `Cost.report`'s `ref.update`, so a
+  currency conflict surfaces as a defect (`die`) straight through the
+  `locally` block in `Interpreter.effect`, violating invariant #3. Dormant
+  today because every `Model` prices in `"USD"`; live the moment a second
+  provider prices in EUR or a caller builds a custom `Model` in another
+  currency. A mixed-currency `Loop` or multi-provider budget will die rather
+  than fail typed. Fix belongs with the budget interpreter (Week 2 continues
+  there) — likely `Money` needs a fixed ledger currency or `Spend.+` needs to
+  return a typed conflict instead of delegating to `Money.+` unguarded.
