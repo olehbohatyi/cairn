@@ -113,7 +113,14 @@ object Interpreter:
 
           case None =>
             for
-              result <- n.run(input).mapError(GraphError.NodeFailed(n.id, _))
+              outcome <- Cost.ref.locally(Spend.empty)(n.run(input).either <*> Cost.ref.get)
+              (rawResult, spend) = outcome
+              // OPEN: spend on a failed node is not recorded anywhere - a
+              // node that billed real tokens and then failed (e.g. a
+              // malformed LLM reply) has no checkpoint to attach `spend` to,
+              // so it is silently dropped here. See CLAUDE.md, "Open
+              // decisions".
+              result <- ZIO.fromEither(rawResult).mapError(GraphError.NodeFailed(n.id, _))
               now <- Clock.instant
               _ <- store
                 .commit(
@@ -122,8 +129,8 @@ object Interpreter:
                     nodeId = n.id,
                     attempt = attempt,
                     value = n.outputSchema.toDynamic(result),
-                    cost = None,
-                    tokens = None,
+                    cost = spend.cost,
+                    tokens = spend.tokens,
                     committedAt = now
                   )
                 )
