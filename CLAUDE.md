@@ -276,10 +276,16 @@ Postgres and assert that committed nodes are not re-executed.
 |------|-------------|
 | 1 | Graph ADT, interpreter, `Seq`/`FanOut`/join, in-memory store |
 | 2 | `LlmClient`, structured outputs via zio-schema, tiering, budget interpreter |
-| 3 | `Verify` / fail-closed, `Loop` / `onExhausted`, testkit + recorded fixtures |
+| 3 | `Verify` / fail-closed, `Loop` / `onExhausted` |
 | 4 | Postgres store, crash-recovery tests under testcontainers |
 | 5 | Suspension and approval gates, resume API |
 | 6 | One full example, docs site, publish `0.1.0` |
+
+`testkit` + recorded fixtures did not fit Week 3 alongside `Verify` and `Loop`.
+Parked as its own unit of work rather than wedged into a week it doesn't fit —
+real, owed scope (a recording `LlmClient` the README promises, and the natural
+place to eventually cover `Anthropic.decode`'s untested status-match arms, see
+Open decisions), not dropped. Not yet assigned a week.
 
 Week 4 is the one that slips. If motivation stalls there, the accepted fallback
 is to cut our own Postgres store from v1 and ship with `dbos4s` as the only
@@ -404,3 +410,39 @@ Recorded at the code that would change, not just here.
   (durability + the graph ADT) holds — but that's the argument that needs
   making explicitly if the question ever comes up, not an assumption to leave
   unstated.
+- **`Verify`'s judge verdict is not checkpointed.** `Interpreter.verify` calls
+  `run(n.inner, ...)` — checkpointing `inner`'s output under `inner`'s own id
+  if `inner` is an `Effect` — then calls `n.judge.check(output)` directly,
+  with no `store.commit` anywhere in `verify` itself. A crash after this node
+  has already passed replays `inner` for free on resume but re-invokes the
+  judge from scratch, unconditionally, every time. Not a correctness bug —
+  replay stays safe — but a real cost for exactly the fresh-context,
+  second-model-call judge cairn is built around. `Node.Loop`'s `accept`
+  verdict had the identical shape and is now fixed — `Interpreter.checkedAccept`
+  checkpoints it under a derived id (`"<loopId>/accept"`), verified by a
+  replay test in `ReplaySpec`. `Verify` still wants the equivalent; it was not
+  ported over when `Loop` landed, and doing so pairs with the node id
+  collisions decision below once a real derived-id scheme exists (today's
+  `"<loopId>/accept"` is a stopgap, not that scheme).
+- **`Verify` has no timeout.** `Node.Verify` carries no timeout field, and
+  `Interpreter.verify` imposes none. A judge that never completes hangs the
+  run rather than failing closed after a bound, unless the judge's own
+  implementation times out internally and maps that to its `E`. Adding a
+  timeout is an ADT change (a new field on `Node.Verify`), not an interpreter
+  one — undecided.
+- **Neither `Loop.accept` nor `Verify.judge` scope `Cost.ref` around their
+  invocation.** `effect` runs the node body inside `Cost.ref.locally(Spend.empty)(...)`
+  and reads the accumulated `Spend` back out to attach to the checkpoint;
+  `checkedAccept`'s call to `n.accept(output)` and `verify`'s call to
+  `n.judge.check(output)` do neither — both hardcode `cost = None, tokens =
+  None` unconditionally. A future LLM-based `accept` or `judge` (the README's
+  whole propose/validate pitch for `Loop`, and the fresh-context second-model
+  pitch for `Verify`, both point straight at this) would report spend into
+  the ambient `FiberRef` with nothing scoped to read it back — silently
+  uncounted, not merely unattributed, and worse than the already-documented
+  failed-node-spend gap because this happens on an outright success with a
+  `cost` field sitting right there on the checkpoint, unused. Dormant today
+  because every `accept` and `judge` in this codebase is code-only. Fix is a
+  real design question — does `checkedAccept` get its own
+  `locally`/`Cost.ref.get` pair mirroring `effect`'s, and does `verify` get
+  the same once it has a checkpoint to attach cost to at all — not done here.
