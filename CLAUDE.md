@@ -159,6 +159,20 @@ testkit        stubbed LLM, recorded fixtures, graph assertions
 examples       runnable, scala-cli friendly
 ```
 
+`llm` went through two drafted variants before merge; one was selected and the
+other is not kept anywhere, including in git history. **v2 was selected over
+v1: fewer files, one shared `node` constructor instead of duplicated
+request-building logic per method, and a seven-case `LlmError` trimmed to
+four** (`RateLimited`/`Overloaded`/`Transport`/`UnexpectedStatus` collapsed
+into `Retryable`, since a caller does the same thing with all three — v1's
+distinct `Provider` enum, `Chunk[Message]` multi-turn history, and
+`stopReason`-carrying `retryAfter` were all either unread anywhere or
+speculative for a library where every node is a fresh call by design). v2's
+own regression — a dropped `stopReason`, which made a `max_tokens` truncation
+indistinguishable from ordinary malformed output — was restored as part of
+the merge, along with a `status: Int`-carrying `UnexpectedStatus` case v2 had
+also collapsed away. v1 is rejected, not deferred.
+
 ## Stack
 
 Versions verified 2026-09-15. Pin them in `project/Dependencies.scala`; do not
@@ -188,11 +202,8 @@ is to publish from 3.3.8, which every 3.3-through-3.9 consumer can read.
 |---|---|---|
 | `dev.zio::zio`, `zio-streams`, `zio-test` | `2.1.26` | |
 | `dev.zio::zio-schema`, `zio-schema-json` | `1.8.7` | checkpoint codecs + JSON Schema |
-| `dev.zio::zio-http` | `3.3.3` | console only, not needed before v2 |
+| `dev.zio::zio-http` | `3.3.3` | `llm`'s Anthropic transport |
 | `dev.zio::zio-opentelemetry` | `3.1.18` | 4.0.0 is still RC12; stay on 3.1.x |
-| `com.softwaremill.sttp.client4::core` | `4.0.26` | |
-| `com.softwaremill.sttp.client4::zio` | `4.0.26` | ZIO backend |
-| sttp-openai | resolve latest | wrapper over sttp client4 |
 | dbos4s | resolve latest | `store-dbos` only |
 | testcontainers-scala | resolve latest | `store-postgres` tests |
 
@@ -231,8 +242,9 @@ artifact, drop the plugin rather than downgrading the build to sbt 1.
 Violations of these are review-blocking regardless of how the code reads.
 
 1. The graph is data. Never a function that hides structure.
-2. `core` imports nothing beyond `zio` and `zio-schema`. sttp must never appear
-   in a public signature — it lives behind our own `LlmClient` trait.
+2. `core` imports nothing beyond `zio` and `zio-schema`. No transport library
+   (`zio-http` today) may appear in a public signature — it lives behind our
+   own `LlmClient` trait.
 3. Every public failure is a case in `GraphError`. No leaked exceptions, no
    `Throwable` in a user-facing error channel.
 4. No test makes a network call. Ever. Use recorded fixtures.
@@ -374,3 +386,20 @@ Recorded at the code that would change, not just here.
   produce `Malformed` or succeed, so nothing currently reaches that arm. Fine
   to keep for a future error shape; "correct but currently unreachable" is the
   honest label, not "defensive."
+- **`JsonSchema`'s permissive fallback.** Sum types with data-carrying cases,
+  `Either`, tuples, and schemas recursing past the first `Lazy` unwrapping all
+  render as a permissive `{}` rather than failing derivation. Right while the
+  surface is small — a loose schema still produces usable output, where a hard
+  failure would block a node that would otherwise work — but it will start
+  hiding bugs once someone models a real domain. Revisit whether an
+  unsupported construct should instead be a compile-time error.
+- **`cairn-store-dbos` positioning.** Dropping it for dependency purity also
+  drops the answer to "why not just use Temporal's Java SDK". Not a dependency
+  decision, a positioning one — unresolved.
+- **`sttp-ai` is a neighbour, not just a dependency declined.** At 0.11.0 it
+  ships structured outputs, tool calling, an agent loop, and an
+  `agent-testkit` module that overlaps with the planned `cairn-testkit`. It
+  does no durable checkpointing and no graph, so cairn's differentiator
+  (durability + the graph ADT) holds — but that's the argument that needs
+  making explicitly if the question ever comes up, not an assumption to leave
+  unstated.
