@@ -3,49 +3,138 @@ package cairn
 import zio.*
 
 /**
- * The bare interpreter: executes a graph with no checkpointing, no budget, no tiering. This is
- * intentionally not what ships — `store-memory` wraps this with checkpoint commits (roadmap Week 1
- * continues there), and `withBudget` / `withCheckpoints` in the README are separate interpreter
- * layers over this one (see CLAUDE.md, "What wraps the graph at run time").
+ * Executes a graph, committing a checkpoint after every [[Node.Effect]] and replaying any that
+ * already committed for this `runId`.
  *
- * Exists so `Effect` / `Seq` / `FanOut` are exercisable and testable before any persistence module
- * lands. `Loop`, `Verify` and `Gate` are not wired yet — running one is a defect, not a silent
- * no-op, so mistakes surface immediately rather than producing a graph that quietly skips a
- * verifier.
+ * This is the only interpreter. Budget, tiering and tracing arrive as layers *over* this one
+ * (CLAUDE.md, "What wraps the graph at run time"); running without persistence is
+ * `CheckpointStore.none`, not a second implementation.
+ *
+ * `Loop`, `Verify` and `Gate` are not wired yet. Reaching one is a defect, not a silent no-op - a
+ * `Verify` node that quietly passed would break invariant #5 in the worst possible way, so it dies
+ * loudly instead.
  */
 object Interpreter:
 
-  def run[R, E, I, O](node: Node[R, E, I, O], input: I): ZIO[R, GraphError[E], O] =
+  /**
+   * The caller supplies `runId`; cairn never generates one. See [[RunId]] for why that is
+   * load-bearing rather than an inconvenience.
+   *
+   * `attempt` starts at [[Attempt.first]] and is advanced only by [[Node.Loop]], never by crash
+   * recovery.
+   */
+  def run[R, E, I, O](
+      node: Node[R, E, I, O],
+      input: I,
+      runId: RunId
+  ): ZIO[R & CheckpointStore, GraphError[E], O] =
+    run(node, input, runId, Attempt.first)
+
+  private def run[R, E, I, O](
+      node: Node[R, E, I, O],
+      input: I,
+      runId: RunId,
+      attempt: Attempt
+  ): ZIO[R & CheckpointStore, GraphError[E], O] =
     node match
-      case n: Node.Effect[R, E, I, O] @unchecked =>
-        n.run(input).mapError(GraphError.NodeFailed(n.id, _))
+      case n: Node.Effect[R, E, I, O] =>
+        effect(n, input, runId, attempt)
 
-      case n: Node.Seq[R, E, I, m, O] @unchecked =>
-        run(n.left, input).flatMap(mid => run(n.right, mid))
+      case n: Node.Seq[R, E, I, ?, O] =>
+        runSeq(n, input, runId, attempt)
 
-      case n: Node.FanOut[R, E, I, O] @unchecked =>
-        ZIO
-          .foreachPar(n.branches)(branch => run(branch, input))
-          .map(results => n.join(results.map(identity)))
+      case n: Node.FanOut[R, E, I, O] =>
+        fanOut(n, input, runId, attempt)
 
-      case n: Node.Loop[?, ?, ?, ?] =>
-        ZIO.die(
-          new NotImplementedError(
-            s"Node.Loop(${n.id.value}) has no interpreter yet — see CLAUDE.md roadmap Week 3"
-          )
+      case n: Node.Loop[R, E, I, O] =>
+        notYetInterpreted(n.id, "Week 3")
+
+      case n: Node.Verify[R, E, I, O] =>
+        notYetInterpreted(
+          n.id,
+          "Week 3 - must never silently pass; failing loudly here is deliberate"
         )
 
-      case n: Node.Verify[?, ?, ?, ?] =>
-        ZIO.die(
-          new NotImplementedError(
-            s"Node.Verify(${n.id.value}) has no interpreter yet — see CLAUDE.md roadmap Week 3." +
-              " This must never silently pass; failing loudly here is deliberate."
-          )
-        )
+      case n: Node.Gate[R, E, I, O] =>
+        notYetInterpreted(n.id, "Week 5")
 
-      case n: Node.Gate[?, ?, ?, ?] =>
-        ZIO.die(
-          new NotImplementedError(
-            s"Node.Gate(${n.id.value}) has no interpreter yet — see CLAUDE.md roadmap Week 5"
-          )
-        )
+  /**
+   * OPEN (question 5): `foreachPar` is fail-fast. When one branch fails, ZIO interrupts its
+   * siblings mid-flight - which throws away an LLM call that has already been paid for, and can
+   * leave a fan-out partially checkpointed (some branches committed, some interrupted before
+   * committing). That partial state is *safe* on resume, because committed branches replay and
+   * interrupted ones re-execute, but it is not free.
+   *
+   * The alternative is to let every branch run to completion and collect failures, trading
+   * money-on-a-doomed-run for money-on-a-cancelled-call. Undecided. This line is the entire
+   * decision - changing it is one call site, so deferring costs nothing.
+   */
+  private def fanOut[R, E, I, O](
+      n: Node.FanOut[R, E, I, O],
+      input: I,
+      runId: RunId,
+      attempt: Attempt
+  ): ZIO[R & CheckpointStore, GraphError[E], O] =
+    ZIO
+      .foreachPar(n.branches)(branch => run(branch, input, runId, attempt))
+      .map(results => n.join(Chunk.fromIterable(results)))
+
+  /**
+   * Split out so the existential middle type `M` is bound by the method's own type parameter rather
+   * than inferred at the match site.
+   */
+  private def runSeq[R, E, I, M, O](
+      n: Node.Seq[R, E, I, M, O],
+      input: I,
+      runId: RunId,
+      attempt: Attempt
+  ): ZIO[R & CheckpointStore, GraphError[E], O] =
+    run(n.left, input, runId, attempt).flatMap(mid => run(n.right, mid, runId, attempt))
+
+  private def effect[R, E, I, O](
+      n: Node.Effect[R, E, I, O],
+      input: I,
+      runId: RunId,
+      attempt: Attempt
+  ): ZIO[R & CheckpointStore, GraphError[E], O] =
+    ZIO.serviceWithZIO[CheckpointStore] { store =>
+      store
+        .get(runId, n.id, attempt)
+        .mapError(GraphError.StoreFailed(n.id, _))
+        .flatMap {
+          case Some(committed) =>
+            // Replay: read the committed value back. The node body does not
+            // execute and is not billed again.
+            ZIO
+              .fromEither(n.outputSchema.fromDynamic(committed.value))
+              .mapError(reason =>
+                GraphError.StoreFailed(n.id, StoreError.DecodeFailed(runId, n.id, reason))
+              )
+
+          case None =>
+            for
+              result <- n.run(input).mapError(GraphError.NodeFailed(n.id, _))
+              now <- Clock.instant
+              _ <- store
+                .commit(
+                  Checkpoint(
+                    runId = runId,
+                    nodeId = n.id,
+                    attempt = attempt,
+                    value = n.outputSchema.toDynamic(result),
+                    cost = None,
+                    tokens = None,
+                    committedAt = now
+                  )
+                )
+                .mapError(GraphError.StoreFailed(n.id, _))
+            yield result
+        }
+    }
+
+  private def notYetInterpreted[E](id: NodeId, when: String): IO[GraphError[E], Nothing] =
+    ZIO.die(
+      new NotImplementedError(
+        s"${id.value} has no interpreter yet - see CLAUDE.md roadmap " + when
+      )
+    )

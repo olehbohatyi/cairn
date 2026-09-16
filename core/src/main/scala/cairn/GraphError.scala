@@ -10,16 +10,20 @@ enum GraphError[+E]:
   case VerificationFailed(nodeId: NodeId, reason: String)
   case Exhausted(nodeId: NodeId, attempts: Int)
 
+  /**
+   * The checkpoint backend failed, or a committed value would not decode.
+   *
+   * Fifth case, added in Week 1 — CLAUDE.md's error model lists four. A store failure is genuinely
+   * not a node failure: the node may never have run, or may have run and succeeded. Collapsing it
+   * into `NodeFailed` would tell the caller something untrue. Update CLAUDE.md to match.
+   */
+  case StoreFailed(nodeId: NodeId, error: StoreError)
+
 /**
  * `Suspended` is a *success* value, not an error — see CLAUDE.md, "Error model". A run that hits an
  * approval gate returns `Either[Suspended, O]`, never a `GraphError`.
  */
 final case class Suspended(runId: RunId, pendingNodeId: NodeId, reason: String)
-
-opaque type RunId = String
-object RunId:
-  def apply(value: String): RunId = value
-  extension (id: RunId) def value: String = id
 
 /**
  * Placeholder pending the budget interpreter (CLAUDE.md roadmap, Week 2). Deliberately minimal —
