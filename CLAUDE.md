@@ -56,11 +56,21 @@ Graph.resume(runId, Approval.Granted)   // same path as crash recovery
 Six cases. Adding a seventh touches every interpreter — resist it. `retry`,
 `timeout`, `cache` and similar are interpreters over `Effect`, not constructors.
 
+Invariant in all four parameters. `O` appears in result position (`Effect`)
+and argument position (`Loop.accept`, `Gate.when`), so no consistent variance
+annotation exists — `[-R, +E, -I, +O]` does not compile.
+
+`Effect` carries its own `Schema[O]`: you cannot checkpoint a value you cannot
+encode, and the node producing the value is where that belongs. The
+consequence is a rule worth holding onto — **checkpoints are taken at Effect
+boundaries only.** `Seq` returns its right child's output and `FanOut` joins
+its branches', and both are already covered by their leaves.
+
 ```scala
-sealed trait Node[-R, +E, -I, +O]:
+sealed trait Node[R, E, I, O]:
   def id: NodeId
 
-case class Effect [R,E,I,O](id: NodeId, run: I => ZIO[R,E,O])
+case class Effect [R,E,I,O](id: NodeId, run: I => ZIO[R,E,O], outputSchema: Schema[O])
 case class Seq    [R,E,I,M,O](left: Node[R,E,I,M], right: Node[R,E,M,O])
 case class FanOut [R,E,I,O](id: NodeId, branches: NonEmptyChunk[Node[R,E,I,?]],
                             join: Chunk[Any] => O)
@@ -78,11 +88,17 @@ private to the interpreter — it must never appear in a user-facing signature.
 
 ```scala
 enum GraphError[+E]:
-  case NodeFailed(e: E)
+  case NodeFailed(nodeId: NodeId, error: E)
   case BudgetExceeded(spent: Money, ceiling: Money)
   case VerificationFailed(nodeId: NodeId, reason: String)
   case Exhausted(nodeId: NodeId, attempts: Int)
+  case StoreFailed(nodeId: NodeId, error: StoreError)
 ```
+
+`StoreFailed` is a fifth case, added when checkpointing landed. A backend
+failure is genuinely not a node failure — the node may never have run, or may
+have run and succeeded but failed to commit. Folding it into `NodeFailed`
+would tell the caller something untrue.
 
 `Suspended` is **not** an error. It is a success value carrying the run id and
 the pending approval, hence `Either[Suspended, O]` in the success channel.
@@ -95,6 +111,17 @@ One row per `(runId, nodeId, attempt)`: the node output encoded via its
 
 - **Write-once, never upsert.** A collision means a concurrent worker took the
   same run; the loser abandons.
+- **The caller supplies `runId`. cairn never generates one.** It is the
+  idempotency key for the whole run: a retried request, a redelivered message
+  and a restarted pod must all arrive with the same id or they are, correctly,
+  different runs. Derive it from something stable — a claim id, a message key —
+  never `UUID.randomUUID()` at the call site.
+- **`attempt` counts logical loop iterations, never physical executions.**
+  Crash recovery does not increment it: a resumed run recomputes the same
+  attempt number, finds the checkpoint and replays. That is what separates the
+  two cases — crash-retry of attempt 0 hits the same key and replays, while a
+  loop retry moves to attempt 1 and executes. A loop therefore needs no
+  checkpointed counter of its own.
 - "Replayed" means the committed value is read back. The node body does not run
   again and is not billed again.
 - `zio-schema` derivation gives both the checkpoint codec and the JSON Schema
