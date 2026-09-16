@@ -46,7 +46,7 @@ lazy val core = project
 
 lazy val llm = project
   .in(file("llm"))
-  .dependsOn(core)
+  .dependsOn(core, storeMemory % Test)
   .settings(commonSettings)
   .settings(
     name := "cairn-llm",

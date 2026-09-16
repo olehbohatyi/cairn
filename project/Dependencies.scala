@@ -9,8 +9,7 @@ object Dependencies {
 
   private val zioVersion       = "2.1.26"
   private val zioSchemaVersion = "1.8.7"
-  private val sttpVersion      = "4.0.26"
-  private val sttpOpenAIVersion         = "0.3.10" // resolve-latest, checked 2026-09-15
+  private val zioHttpVersion   = "3.3.3"
   private val dbos4sVersion             = "0.1.0"  // resolve-latest, checked 2026-09-15
   private val testcontainersScalaVersion = "0.44.1" // resolve-latest, checked 2026-09-15
   private val hikariCPVersion   = "7.1.0"
@@ -27,12 +26,13 @@ object Dependencies {
   // core: zio + zio-schema only (invariant #2 in CLAUDE.md — nothing else, ever, without asking).
   val core: Seq[ModuleID] = Seq(zio, zioSchema, zioTest, zioTestSbt)
 
-  val sttpClient   = "com.softwaremill.sttp.client4" %% "core" % sttpVersion
-  val sttpClientZio = "com.softwaremill.sttp.client4" %% "zio" % sttpVersion
-  val sttpOpenAI    = "com.softwaremill.sttp.openai"  %% "core" % sttpOpenAIVersion
+  val zioHttp = "dev.zio" %% "zio-http" % zioHttpVersion
 
+  // No sttp, no provider SDK: one endpoint of the Messages API, hand-rolled
+  // over zio-http. zio-schema-json decodes the reply against the node's own
+  // Schema[A] - see llm/Llm.scala.
   val llm: Seq[ModuleID] =
-    Seq(sttpClient, sttpClientZio, sttpOpenAI, zioSchemaJson, zioTest, zioTestSbt)
+    Seq(zioHttp, zioSchemaJson, zioTest, zioTestSbt)
 
   val storeMemory: Seq[ModuleID] = Seq(zioTest, zioTestSbt)
 
