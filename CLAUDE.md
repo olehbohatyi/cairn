@@ -360,3 +360,17 @@ Recorded at the code that would change, not just here.
   than fail typed. Fix belongs with the budget interpreter (Week 2 continues
   there) — likely `Money` needs a fixed ledger currency or `Spend.+` needs to
   return a typed conflict instead of delegating to `Money.+` unguarded.
+- **`Anthropic`'s transport layer is untested — not just `UnexpectedStatus`.**
+  `StructuredNodeSpec` stubs `LlmClient` directly and never constructs an
+  `Anthropic` or reaches `decode`/`parse`, so the entire status match
+  (`401`/`403`, `400`, `429`, `5xx`, and the `200` branch's actual HTTP
+  round-trip and JSON extraction) is equally unreached by anything in this
+  module — `UnexpectedStatus` just happens to be the case that was added most
+  recently, not the one gap. This is a scope boundary, not a bug: needs a fake
+  `Client`, not a fake `LlmClient`, which is a `cairn-testkit` job. Related but
+  distinct: `Llm.node`'s truncation-detecting `mapError` has a `case other =>
+  other` fallthrough that is dead code today, not defensive code that is
+  merely unexercised — `structured`'s and `text`'s `decode` closures only ever
+  produce `Malformed` or succeed, so nothing currently reaches that arm. Fine
+  to keep for a future error shape; "correct but currently unreachable" is the
+  honest label, not "defensive."
