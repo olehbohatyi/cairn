@@ -163,15 +163,16 @@ examples       runnable, scala-cli friendly
 other is not kept anywhere, including in git history. **v2 was selected over
 v1: fewer files, one shared `node` constructor instead of duplicated
 request-building logic per method, and a seven-case `LlmError` trimmed to
-four** (`RateLimited`/`Overloaded`/`Transport`/`UnexpectedStatus` collapsed
-into `Retryable`, since a caller does the same thing with all three — v1's
-distinct `Provider` enum, `Chunk[Message]` multi-turn history, and
-`stopReason`-carrying `retryAfter` were all either unread anywhere or
-speculative for a library where every node is a fresh call by design). v2's
-own regression — a dropped `stopReason`, which made a `max_tokens` truncation
-indistinguishable from ordinary malformed output — was restored as part of
-the merge, along with a `status: Int`-carrying `UnexpectedStatus` case v2 had
-also collapsed away. v1 is rejected, not deferred.
+five** (`RateLimited`/`Overloaded`/`Transport` collapsed into `Retryable`,
+since a caller does the same thing with all three: retry; `InvalidRequest`
+and `UnexpectedStatus` both fell into a generic `Rejected` — v1's distinct
+`Provider` enum and `Chunk[Message]` multi-turn history were either unread
+anywhere or speculative for a library where every node is a fresh call by
+design). v2's own regression — a dropped `stopReason` on `LlmResponse`, which
+made a `max_tokens` truncation indistinguishable from ordinary malformed
+output — was restored as part of the merge, along with a `status: Int`-
+carrying `UnexpectedStatus` case, now a distinct fifth `LlmError` case rather
+than folded into `Rejected`. v1 is rejected, not deferred.
 
 ## Stack
 
