@@ -63,7 +63,9 @@ object Week4Spec extends ZIOSpecDefault:
       val failingAfterSpend = Node.Effect[Any, String, Int, Int](
         NodeId("flaky"),
         _ =>
-          Cost.report(Spend(Some(Money(50, "USD")), Some(TokenCount(100, 20)))) *>
+          Cost
+            .report(Spend(Some(Money(50, "USD")), Some(TokenCount(100, 20))))
+            .orDieWith(m => new AssertionError(m.toString)) *>
             ZIO.fail("malformed reply"),
         intSchema
       )
@@ -92,7 +94,10 @@ object Week4Spec extends ZIOSpecDefault:
       given Schema[String] = Schema.primitive[String]
       val node = Node.Effect[Any, Nothing, Int, String](
         NodeId("extract"),
-        _ => Cost.report(Spend(Some(Money(10, "USD")), None)) *> ZIO.succeed(huge),
+        _ =>
+          Cost
+            .report(Spend(Some(Money(10, "USD")), None))
+            .orDieWith(m => new AssertionError(m.toString)) *> ZIO.succeed(huge),
         summon[Schema[String]]
       )
       for

@@ -11,16 +11,28 @@ import zio.*
 final case class Spend(cost: Option[Money], tokens: Option[TokenCount]):
   def isEmpty: Boolean = cost.isEmpty && tokens.isEmpty
 
-  def +(other: Spend): Spend =
-    Spend(
-      cost = Spend.merge(cost, other.cost)(_ + _),
-      tokens = Spend.merge(tokens, other.tokens)((a, b) =>
-        TokenCount(a.input + b.input, a.output + b.output)
+  def +(other: Spend): Either[CurrencyMismatch, Spend] =
+    Spend
+      .mergeCost(cost, other.cost)
+      .map(mergedCost =>
+        Spend(
+          cost = mergedCost,
+          tokens = Spend.merge(tokens, other.tokens)((a, b) =>
+            TokenCount(a.input + b.input, a.output + b.output)
+          )
+        )
       )
-    )
 
 object Spend:
   val empty: Spend = Spend(None, None)
+
+  private def mergeCost(
+      a: Option[Money],
+      b: Option[Money]
+  ): Either[CurrencyMismatch, Option[Money]] =
+    (a, b) match
+      case (Some(x), Some(y)) => (x + y).map(Some(_))
+      case _ => Right(a.orElse(b))
 
   private def merge[A](a: Option[A], b: Option[A])(f: (A, A) => A): Option[A] =
     (a, b) match
@@ -50,6 +62,10 @@ object Cost:
 
   /**
    * Called by a node body (the `llm` module, today) after a billed call completes. Accumulates
-   * rather than overwrites — see [[Spend.+]].
+   * rather than overwrites — see [[Spend.+]]. Fails with [[CurrencyMismatch]] if `spend` is priced
+   * in a different currency than what this execution has already reported; the accumulator is left
+   * unchanged in that case, so the mismatching spend is not recorded anywhere. The node body
+   * decides what a mismatch means in its own error type.
    */
-  def report(spend: Spend): UIO[Unit] = ref.update(_ + spend)
+  def report(spend: Spend): IO[CurrencyMismatch, Unit] =
+    ref.get.flatMap(current => ZIO.fromEither(current + spend)).flatMap(ref.set)

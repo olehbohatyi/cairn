@@ -109,7 +109,12 @@ final case class Llm(model: Model, maxTokens: Int = 4096, system: Option[String]
             _.complete(LlmRequest(model, system, prompt(input), maxTokens, schemaJson))
           )
           .flatMap { r =>
-            Cost.report(Spend(Some(model.cost(r.tokens)), Some(r.tokens))) *>
+            // Unreachable today, not defensive: `Interpreter.effect` hands every body a fresh
+            // empty accumulator and this body reports once, and a first report can never
+            // mismatch. Becomes reachable once a node reports more than once per execution.
+            Cost
+              .report(Spend(Some(model.cost(r.tokens)), Some(r.tokens)))
+              .mapError(m => LlmError.Rejected(s"currency mismatch: ${m.a} vs ${m.b}")) *>
               ZIO.fromEither(decode(r.text, schema)).mapError {
                 // A truncated tool-call/reply produces the same generic parse
                 // failure as any other malformed output. stop_reason is the

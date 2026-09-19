@@ -41,13 +41,23 @@ final case class Suspended(runId: RunId, pendingNodeId: NodeId, reason: String)
  * rounding logic on top of this until the budget interpreter actually needs it.
  */
 final case class Money(cents: Long, currency: String):
-  def +(other: Money): Money =
-    require(currency == other.currency, s"currency mismatch: $currency vs ${other.currency}")
-    Money(cents + other.cents, currency)
+  def +(other: Money): Either[CurrencyMismatch, Money] =
+    if currency == other.currency then Right(Money(cents + other.cents, currency))
+    else Left(CurrencyMismatch(currency, other.currency))
 
+  /**
+   * Still `require`s matching currencies and throws on mismatch - the same defect `+` used to have,
+   * deliberately not fixed here: nothing calls it yet, and its natural caller (the budget
+   * interpreter's ceiling check) is where the right shape gets decided. See CLAUDE.md, Open
+   * decisions, `Spend` accumulation.
+   */
   def >(other: Money): Boolean =
     require(currency == other.currency, s"currency mismatch: $currency vs ${other.currency}")
     cents > other.cents
 
 object Money:
   def eur(amount: Double): Money = Money(math.round(amount * 100), "EUR")
+  def usd(amount: Double): Money = Money(math.round(amount * 100), "USD")
+
+/** Two amounts in different currencies were combined. cairn does no currency conversion. */
+final case class CurrencyMismatch(a: String, b: String)

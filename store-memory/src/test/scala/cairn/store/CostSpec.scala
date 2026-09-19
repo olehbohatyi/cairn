@@ -19,14 +19,17 @@ object CostSpec extends ZIOSpecDefault:
   private def billing(id: String, spend: Spend*): Node.Effect[Any, String, Int, Int] =
     Node.Effect(
       NodeId(id),
-      i => ZIO.foreachDiscard(spend)(Cost.report).as(i),
+      i =>
+        ZIO
+          .foreachDiscard(spend)(s => Cost.report(s).orDieWith(m => new AssertionError(m.toString)))
+          .as(i),
       summon[Schema[Int]]
     )
 
   private def failingAfterBilling(id: String, spend: Spend): Node.Effect[Any, String, Int, Int] =
     Node.Effect(
       NodeId(id),
-      _ => Cost.report(spend) *> ZIO.fail("boom"),
+      _ => Cost.report(spend).orDieWith(m => new AssertionError(m.toString)) *> ZIO.fail("boom"),
       summon[Schema[Int]]
     )
 
