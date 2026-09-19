@@ -93,7 +93,12 @@ enum GraphError[+E]:
   case VerificationFailed(nodeId: NodeId, reason: String)
   case Exhausted(nodeId: NodeId, attempts: Int)
   case StoreFailed(nodeId: NodeId, error: StoreError)
+  case JudgeTimedOut(nodeId: NodeId, timeout: Duration)
 ```
+
+`JudgeTimedOut` is a sixth case, added when `Verify` gained an optional
+`timeout`. Distinct from `NodeFailed` because the judge's own effect never
+actually failed — it simply didn't finish — so there is no `E` value to carry.
 
 `StoreFailed` is a fifth case, added when checkpointing landed. A backend
 failure is genuinely not a node failure — the node may never have run, or may
@@ -347,26 +352,36 @@ sbt docs/mdoc     build and typecheck documentation
 
 Recorded at the code that would change, not just here.
 
-- **Blob-sized checkpoint values.** `Checkpoint.value` is stored inline with no
-  size cap; a 40-page PDF extraction puts tens of megabytes in a Postgres row.
-  The alternative spills past a threshold to blob storage. Deciding later is a
-  store migration, so settle it before Week 4.
-- **Node id collisions.** Ids are not path-qualified, so a sub-graph used twice,
-  or two fan-out branches sharing a name, collide in the store and replay each
-  other's output. Fix is to key on a path; it changes the store schema, so it
-  pairs with the blob decision.
+- **Blob-sized checkpoint values: FIXED (Week 4), approximately.** `Checkpoint`
+  commits now reject anything over `CheckpointSize.MaxApproxBytes` (256 KB)
+  with a typed `StoreError.ValueTooLarge`, checked via `approxBytes` — a
+  `toString.length` proxy, not a byte-accurate encoding, since `core` has no
+  serializer to measure real bytes (invariant #2: no `zio-schema-json` in
+  `core`). Catches the "silently wrote a 40MB row" failure mode; does not
+  implement full blob-storage spillover, which is still real, undone scope if
+  256 KB turns out too small for a real workload.
+- **Node id collisions: NARROWED (Week 4), not closed.** `Path` qualifies
+  `FanOut` branches by position and disambiguates nested `Loop`/`Verify`
+  bodies by ancestor id before hitting the store — the two collision shapes
+  named when this gap was first recorded. `Seq`'s `left`/`right` still share
+  one path and are NOT disambiguated: two children of one `Seq` sharing a
+  literal id still collide. A future reader should not assume this is fully
+  solved.
 - **Fan-out failure mode.** `foreachPar` is fail-fast: one branch failing
   interrupts its siblings, discarding LLM calls already paid for and leaving a
   partially checkpointed fan-out. Safe on resume, not free. The alternative is
   to let all branches finish and collect failures. One call site either way.
-- **Spend on a failed node is not recorded anywhere.** `Interpreter.effect`
-  reads back a node's accumulated `Cost.ref` regardless of whether the body
-  succeeded or failed, but only a successful node produces a `Checkpoint` to
-  attach that spend to — there is no checkpoint for a node that failed. A
-  malformed LLM reply that billed real tokens and then failed to parse leaves
-  no trace. Same category as the other two: the honest fix is probably a
-  lightweight "attempt record" distinct from a `Checkpoint`, which is a store
-  schema decision. Decide before `store-postgres`.
+- **Spend on a failed node is not recorded anywhere: FIXED (Week 4).** A
+  distinct `AttemptRecord` (not a `Checkpoint` — a checkpoint means "final and
+  safe to replay," an attempt record means "this much was spent trying," and
+  conflating them would let a failed attempt's data get replayed as if it had
+  succeeded) is written via `CheckpointStore.recordAttempt` from `effect`'s
+  failure branch, best-effort (`.ignore`d — a store hiccup while auditing a
+  failure must never mask the real failure). `listAttempts` reads them back;
+  nothing in `Interpreter` reads them itself yet — this is a pure audit trail,
+  not consumed by replay logic. `CheckpointStore` is six methods now, not
+  four; the README's "four methods, an afternoon" line has been updated to
+  match.
 - **`Spend` accumulation assumes single-currency pricing.** `Spend.+` sums
   `Option[Money]` via `Money.+`, which `require`s matching currencies and
   throws `IllegalArgumentException` — a bare `Throwable`, not a `GraphError` —
@@ -410,39 +425,39 @@ Recorded at the code that would change, not just here.
   (durability + the graph ADT) holds — but that's the argument that needs
   making explicitly if the question ever comes up, not an assumption to leave
   unstated.
-- **`Verify`'s judge verdict is not checkpointed.** `Interpreter.verify` calls
-  `run(n.inner, ...)` — checkpointing `inner`'s output under `inner`'s own id
-  if `inner` is an `Effect` — then calls `n.judge.check(output)` directly,
-  with no `store.commit` anywhere in `verify` itself. A crash after this node
-  has already passed replays `inner` for free on resume but re-invokes the
-  judge from scratch, unconditionally, every time. Not a correctness bug —
-  replay stays safe — but a real cost for exactly the fresh-context,
-  second-model-call judge cairn is built around. `Node.Loop`'s `accept`
-  verdict had the identical shape and is now fixed — `Interpreter.checkedAccept`
-  checkpoints it under a derived id (`"<loopId>/accept"`), verified by a
-  replay test in `ReplaySpec`. `Verify` still wants the equivalent; it was not
-  ported over when `Loop` landed, and doing so pairs with the node id
-  collisions decision below once a real derived-id scheme exists (today's
-  `"<loopId>/accept"` is a stopgap, not that scheme).
-- **`Verify` has no timeout.** `Node.Verify` carries no timeout field, and
-  `Interpreter.verify` imposes none. A judge that never completes hangs the
-  run rather than failing closed after a bound, unless the judge's own
-  implementation times out internally and maps that to its `E`. Adding a
-  timeout is an ADT change (a new field on `Node.Verify`), not an interpreter
-  one — undecided.
+- **`Verify`'s judge verdict is not checkpointed: FIXED (Week 4).**
+  `Interpreter.checkedJudge` checkpoints the verdict under a path-qualified
+  derived id (`"<verifyId>/judge"`), mirroring `checkedAccept` exactly. A
+  crash after a `Verify` node has already passed now replays the verdict on
+  resume instead of re-invoking the judge from scratch — verified by the
+  updated replay test in `ReplaySpec` (previously asserted `judgeRuns == 2`,
+  proving the gap; now asserts `judgeRuns == 1`, proving the fix) and by
+  `NestedPathSpec`, which confirms the same qualification works correctly
+  when `Verify` sits inside a non-root path handed down from an enclosing
+  `FanOut` branch, not just at the graph root.
+- **`Verify` has no timeout: FIXED (Week 4).** `Node.Verify` gained an
+  additive `timeout: Option[Duration] = None` field — every existing
+  `Node.Verify(id, inner, judge)` call site is unaffected by the default. When
+  set, `checkedJudge` bounds the judge call with `.timeout(d)` and fails with
+  the new `GraphError.JudgeTimedOut(nodeId, timeout)` rather than hanging the
+  run; when unset, behavior is unchanged from before. Timeout handling only
+  applies on a cache miss — a replayed verdict is instant, so there is nothing
+  to bound. Verified with `TestClock` (fork, adjust, join), not real sleeps,
+  in `VerifyTimeoutSpec`.
 - **Neither `Loop.accept` nor `Verify.judge` scope `Cost.ref` around their
   invocation.** `effect` runs the node body inside `Cost.ref.locally(Spend.empty)(...)`
   and reads the accumulated `Spend` back out to attach to the checkpoint;
-  `checkedAccept`'s call to `n.accept(output)` and `verify`'s call to
+  `checkedAccept`'s call to `n.accept(output)` and `checkedJudge`'s call to
   `n.judge.check(output)` do neither — both hardcode `cost = None, tokens =
-  None` unconditionally. A future LLM-based `accept` or `judge` (the README's
-  whole propose/validate pitch for `Loop`, and the fresh-context second-model
-  pitch for `Verify`, both point straight at this) would report spend into
-  the ambient `FiberRef` with nothing scoped to read it back — silently
-  uncounted, not merely unattributed, and worse than the already-documented
+  None` unconditionally, even now that `checkedJudge` commits a real
+  `Checkpoint` for the verdict (Week 4) the same way `checkedAccept` always
+  has. A future LLM-based `accept` or `judge` (the README's whole
+  propose/validate pitch for `Loop`, and the fresh-context second-model pitch
+  for `Verify`, both point straight at this) would report spend into the
+  ambient `FiberRef` with nothing scoped to read it back — silently
+  uncounted, not merely unattributed, and worse than the already-fixed
   failed-node-spend gap because this happens on an outright success with a
   `cost` field sitting right there on the checkpoint, unused. Dormant today
   because every `accept` and `judge` in this codebase is code-only. Fix is a
-  real design question — does `checkedAccept` get its own
-  `locally`/`Cost.ref.get` pair mirroring `effect`'s, and does `verify` get
-  the same once it has a checkpoint to attach cost to at all — not done here.
+  real design question — does `checkedAccept`/`checkedJudge` get their own
+  `locally`/`Cost.ref.get` pair mirroring `effect`'s — not done here.

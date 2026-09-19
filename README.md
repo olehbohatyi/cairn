@@ -136,7 +136,9 @@ in week three for exactly the reason you are thinking.
 | `cairn-store-postgres` | Postgres over JDBC | the default |
 | `cairn-store-dbos` | [DBOS](https://github.com/dbos-inc) via `dbos4s` | teams already running DBOS |
 
-`CheckpointStore` is a four-method trait. Writing one for your own store is an
+`CheckpointStore` is a six-method trait — `get`/`commit`/`list`/`delete` for
+checkpoints, plus `recordAttempt`/`listAttempts` for the audit trail of what a
+failed attempt cost. Writing one for your own store is still close to an
 afternoon.
 
 ## Relationship to other tools
