@@ -24,6 +24,13 @@ import zio.Chunk
  * `qualify` is the identity when the path is root - every checkpoint key for a top-level,
  * non-nested node is completely unchanged by this type's introduction, which is what keeps every
  * existing test's assertions valid.
+ *
+ * One field name, two different meanings depending on which enum you're reading: `StoreError`'s
+ * `nodeId` field always holds the qualified store key this type produces (what `qualify` returned),
+ * while `GraphError`'s `nodeId` field always holds the plain, unqualified id the graph author wrote
+ * (the split described in the first paragraph). Both are called `nodeId`. A future reader skimming
+ * past one and assuming it matches the other's meaning will get it wrong; there is no shortcut but
+ * to check which enum you're in.
  */
 opaque type Path = Chunk[String]
 
