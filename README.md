@@ -48,7 +48,7 @@ val claim =
     .join("decide")(Decision.combine)
     .verify("audit", freshContext = true)(Verdict.defaultFail)
     .approvalGate(when = _.amount > Money.eur(5000))
-    .withBudget(Budget.eur(0.40))
+    .withBudget(Budget.usd(0.40))
     .withCheckpoints(Postgres.store)
 
 claim.run(request)
@@ -75,7 +75,9 @@ on disk. `Graph.resume(runId, Approval.Granted)` continues from that node when
 the human decides, days later if necessary.
 
 `.withBudget` — the run aborts at the ceiling. `BudgetExceeded` is a case in the
-error channel, so the compiler makes you handle it.
+error channel, so the compiler makes you handle it. The ceiling is in the
+currency your models are priced in (USD for the built-in ones); cairn does no
+currency conversion.
 
 `.withCheckpoints` — state is committed after every node. Crash at `estimate`
 and a restart picks up there; `extract` and `fraud` are not re-run and not

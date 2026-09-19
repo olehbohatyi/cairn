@@ -382,18 +382,25 @@ Recorded at the code that would change, not just here.
   not consumed by replay logic. `CheckpointStore` is six methods now, not
   four; the README's "four methods, an afternoon" line has been updated to
   match.
-- **`Spend` accumulation assumes single-currency pricing.** `Spend.+` sums
-  `Option[Money]` via `Money.+`, which `require`s matching currencies and
-  throws `IllegalArgumentException` — a bare `Throwable`, not a `GraphError` —
-  on mismatch. That `require` fires inside `Cost.report`'s `ref.update`, so a
-  currency conflict surfaces as a defect (`die`) straight through the
-  `locally` block in `Interpreter.effect`, violating invariant #3. Dormant
-  today because every `Model` prices in `"USD"`; live the moment a second
-  provider prices in EUR or a caller builds a custom `Model` in another
-  currency. A mixed-currency `Loop` or multi-provider budget will die rather
-  than fail typed. Fix belongs with the budget interpreter (Week 2 continues
-  there) — likely `Money` needs a fixed ledger currency or `Spend.+` needs to
-  return a typed conflict instead of delegating to `Money.+` unguarded.
+- **`Spend` accumulation assumes single-currency pricing: crash FIXED, design
+  deferred.** `Money.+` and `Spend.+` return `Either[CurrencyMismatch, _]`,
+  and `Cost.report` is `IO[CurrencyMismatch, Unit]`, so a mixed-currency report
+  is a typed failure instead of a dead fiber (invariant #3). The node body
+  chooses what a mismatch means in its own error type: `Llm.node` maps it to
+  `LlmError.Rejected`; a `CurrencyMismatch` in a custom `E` surfaces as
+  `NodeFailed`. On a mismatch the accumulator is left unchanged, so the
+  mismatching spend is recorded nowhere, not even as an `AttemptRecord`.
+  Still open, on purpose: `Money.>` still `require`s matching currencies and
+  throws. Nothing calls it yet, and its natural caller is the budget
+  interpreter's ceiling check, where its shape gets decided. The real design
+  question is also open: whether the interpreter enforces one currency per
+  graph at construction time, using the static-validation property the graph
+  design exists to give. Deferred to the budget interpreter, which was named in
+  Week 1's "what wraps the graph" list and is still unbuilt. The live version
+  of this problem was the README's own pitch: `Model` prices in `"USD"` and the
+  example budgeted in EUR. The example now says `Budget.usd`. `store-postgres`
+  stores `Money` as `(cost_cents BIGINT, currency CHAR(3))`, not a fixed-currency
+  column, so a second currency later is not a migration.
 - **`Anthropic`'s transport layer is untested — not just `UnexpectedStatus`.**
   `StructuredNodeSpec` stubs `LlmClient` directly and never constructs an
   `Anthropic` or reaches `decode`/`parse`, so the entire status match
