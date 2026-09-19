@@ -44,7 +44,7 @@ object Dependencies {
     "com.dimafeng" %% "testcontainers-scala-postgresql" % testcontainersScalaVersion % Test
 
   val storePostgres: Seq[ModuleID] =
-    Seq(hikariCP, postgresql, zioTest, zioTestSbt, testcontainersScalaCore, testcontainersScalaPostgres)
+    Seq(hikariCP, postgresql, zioSchemaJson, zioTest, zioTestSbt, testcontainersScalaCore, testcontainersScalaPostgres)
 
   // dbos4s artifact ids embed the DBOS transact protocol version they target (transact0.9).
   val dbos4s = "xyz.matthieucourt" %% "dbos4s-transact0.9" % dbos4sVersion

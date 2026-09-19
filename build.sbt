@@ -64,7 +64,7 @@ lazy val storeMemory = project
 
 lazy val storePostgres = project
   .in(file("store-postgres"))
-  .dependsOn(core)
+  .dependsOn(core, storeMemory % Test)
   .settings(commonSettings)
   .settings(
     name := "cairn-store-postgres",
