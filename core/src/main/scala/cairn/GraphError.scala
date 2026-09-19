@@ -1,5 +1,7 @@
 package cairn
 
+import zio.Duration
+
 /**
  * The closed failure channel for a graph run. No `Throwable` escapes here — see CLAUDE.md invariant
  * #3. A node's own domain error is carried in `E`.
@@ -13,11 +15,19 @@ enum GraphError[+E]:
   /**
    * The checkpoint backend failed, or a committed value would not decode.
    *
-   * Fifth case, added in Week 1 — CLAUDE.md's error model lists four. A store failure is genuinely
-   * not a node failure: the node may never have run, or may have run and succeeded. Collapsing it
-   * into `NodeFailed` would tell the caller something untrue. Update CLAUDE.md to match.
+   * Fifth case, added when checkpointing landed. A store failure is genuinely not a node failure:
+   * the node may never have run, or may have run and succeeded. Collapsing it into `NodeFailed`
+   * would tell the caller something untrue.
    */
   case StoreFailed(nodeId: NodeId, error: StoreError)
+
+  /**
+   * A `Verify` node's `judge` did not answer within its configured `timeout`. Sixth case, added
+   * when `Verify` gained an optional `timeout` (Week 4). Distinct from `NodeFailed` because the
+   * judge's own effect never actually failed - it simply didn't finish - so there is no `E` value
+   * to carry.
+   */
+  case JudgeTimedOut(nodeId: NodeId, timeout: Duration)
 
 /**
  * `Suspended` is a *success* value, not an error — see CLAUDE.md, "Error model". A run that hits an

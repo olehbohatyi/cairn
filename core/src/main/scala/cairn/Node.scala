@@ -37,7 +37,9 @@ object Node:
 
   /**
    * Sequential composition. `left` commits its checkpoint before `right` begins, so a crash between
-   * the two resumes at `right` without re-running `left`.
+   * the two resumes at `right` without re-running `left`. Does not itself descend a [[Path]]
+   * segment - see `Path`'s doc comment for why that is a known, narrower gap rather than an
+   * oversight.
    */
   final case class Seq[R, E, I, M, O](
       id: NodeId,
@@ -51,6 +53,9 @@ object Node:
    *
    * The existential branch type and `Chunk[Any]` join input are the accepted escape hatch noted in
    * CLAUDE.md — an interpreter implementation detail that must never surface in a public signature.
+   *
+   * Each branch is qualified by its position (`"<id>#<index>"`, see [[Path]]) before hitting the
+   * store, so two branches sharing a literal `NodeId` no longer collide.
    */
   final case class FanOut[R, E, I, O](
       id: NodeId,
@@ -64,9 +69,9 @@ object Node:
    * every other node - `Loop` is simply the only case that advances it, incrementing by one per
    * rejection and leaving it untouched on every other path. See `Interpreter.iterate`.
    *
-   * `accept`'s verdict is checkpointed under a derived id (`"<loopId>/accept"`), same `attempt`,
-   * honoring the commitment in `Ids.scala`'s `Attempt` doc comment - a resumed loop does not re-run
-   * an expensive validation any more than it re-runs `body`.
+   * `accept`'s verdict is checkpointed under a path-qualified derived id (`"<loopId>/accept"`),
+   * same `attempt`, honoring the commitment in `Ids.scala`'s `Attempt` doc comment - a resumed loop
+   * does not re-run an expensive validation any more than it re-runs `body`.
    *
    * OPEN: `accept: O => ZIO[R, E, Boolean]` has no channel to explain *why* it rejected - only
    * whether. `Interpreter.iterate` therefore synthesizes a generic
@@ -94,18 +99,22 @@ object Node:
    * CLAUDE.md invariant #5 — there is no path to success that skips this check.
    * `Interpreter.verify` enforces this with a plain `if verdict then succeed else fail`, not a fold
    * that could quietly treat a judge failure as a pass; see that method's doc comment for exactly
-   * what does and does not fail closed (a dying judge, a judge with no timeout).
+   * what does and does not fail closed (a dying judge, a judge with no timeout set).
    *
-   * OPEN: the judge's verdict is not checkpointed anywhere - only `inner`'s output is, and only if
-   * `inner` is an `Effect`. A crash after this node has already passed replays `inner` for free on
-   * resume but re-invokes `judge` from scratch every time, unconditionally. That is a real cost,
-   * not just a correctness footnote, for exactly the fresh-context second-model-call judge this
-   * library is built around. See CLAUDE.md, "Open decisions".
+   * FIXED (was OPEN): the judge's verdict is now checkpointed under a path-qualified derived id
+   * (`"<verifyId>/judge"`), mirroring `Loop.accept` exactly - `Interpreter.checkedJudge`. A crash
+   * after this node has already passed now replays the verdict on resume instead of re-invoking the
+   * judge from scratch. See the updated replay test in `store-memory`.
+   *
+   * `timeout`, when set, bounds the judge call; a judge that does not answer within `timeout` fails
+   * the run with `GraphError.JudgeTimedOut` rather than hanging it. Defaults to `None` (unbounded,
+   * the prior behavior) so every existing `Verify(id, inner, judge)` call site is unaffected.
    */
   final case class Verify[R, E, I, O](
       id: NodeId,
       inner: Node[R, E, I, O],
-      judge: Verify.Judge[R, E, O]
+      judge: Verify.Judge[R, E, O],
+      timeout: Option[Duration] = None
   ) extends Node[R, E, I, O]
 
   object Verify:

@@ -113,7 +113,7 @@ object ReplaySpec extends ZIOSpecDefault:
       )
     },
     test(
-      "Verify's judge is re-invoked on every run even after the node already passed - the checkpoint gap CLAUDE.md records, made checked rather than merely described"
+      "Verify's judge verdict is now checkpointed - re-run with the same runId replays it instead of re-invoking the judge"
     ) {
       val runId = RunId("verify-replay")
       for
@@ -132,7 +132,10 @@ object ReplaySpec extends ZIOSpecDefault:
         first == 42,
         second == 42,
         innerRuns == 1, // inner replayed from its checkpoint, per the existing contract
-        judgeRuns == 2 // judge re-invoked unconditionally - not checkpointed at all
+        // FIXED (Week 4): this was `judgeRuns == 2` before checkedJudge
+        // started checkpointing the verdict under a derived id, mirroring
+        // Loop.accept. See Interpreter.checkedJudge.
+        judgeRuns == 1
       )
     },
     test(
