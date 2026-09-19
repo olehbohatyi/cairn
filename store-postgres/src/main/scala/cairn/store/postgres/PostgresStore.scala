@@ -264,7 +264,7 @@ object PostgresStore:
 
   private val SelectRun =
     s"SELECT $Columns FROM cairn_checkpoint WHERE run_id = ? " +
-      "ORDER BY committed_at, node_id, attempt"
+      "ORDER BY committed_at, node_id COLLATE \"C\", attempt"
 
   private val InsertCheckpoint =
     "INSERT INTO cairn_checkpoint (run_id, node_id, attempt, value, cost_cents, currency, " +

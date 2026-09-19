@@ -154,6 +154,20 @@ object CheckpointStoreContract:
           yield assertTrue(listed.map(_.nodeId.value) == Chunk("first", "second", "third"))
         }
       },
+      test("list breaks ties on equal commit time by node id, then attempt") {
+        val runId = RunId("c-list-ties")
+        withStore { store =>
+          for
+            _ <- store.commit(checkpoint(runId, "b", Attempt(0)))
+            _ <- store.commit(checkpoint(runId, "a", Attempt(1)))
+            _ <- store.commit(checkpoint(runId, "a", Attempt(0)))
+            listed <- store.list(runId)
+          yield assertTrue(
+            listed.map(c => (c.nodeId.value, c.attempt.value)) ==
+              Chunk(("a", 0), ("a", 1), ("b", 0))
+          )
+        }
+      },
       test("delete removes one run's checkpoints and attempts and leaves other runs alone") {
         val gone = RunId("c-delete-gone")
         val kept = RunId("c-delete-kept")

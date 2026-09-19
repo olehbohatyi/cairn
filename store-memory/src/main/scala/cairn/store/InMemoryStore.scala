@@ -49,7 +49,7 @@ final class InMemoryStore(
     checkpoints.get.map { committed =>
       Chunk
         .fromIterable(committed.collect { case (k, v) if k.runId == runId => v })
-        .sortBy(_.committedAt)
+        .sortBy(c => (c.committedAt, c.nodeId.value, c.attempt.value))
     }
 
   def delete(runId: RunId): IO[StoreError, Unit] =
