@@ -399,7 +399,7 @@ Recorded at the code that would change, not just here.
   Week 1's "what wraps the graph" list and is still unbuilt. The live version
   of this problem was the README's own pitch: `Model` prices in `"USD"` and the
   example budgeted in EUR. The example now says `Budget.usd`. `store-postgres`
-  stores `Money` as `(cost_cents BIGINT, currency CHAR(3))`, not a fixed-currency
+  stores `Money` as `(cost_cents BIGINT, currency VARCHAR(3))`, not a fixed-currency
   column, so a second currency later is not a migration.
 - **`Anthropic`'s transport layer is untested — not just `UnexpectedStatus`.**
   `StructuredNodeSpec` stubs `LlmClient` directly and never constructs an

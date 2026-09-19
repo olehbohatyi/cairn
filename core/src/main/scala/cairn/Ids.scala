@@ -3,11 +3,10 @@ package cairn
 /**
  * Identifies a node within a graph. First component of a checkpoint key.
  *
- * KNOWN DEFECT: ids are not path-qualified, so two nodes with the same id in one graph - a
- * sub-graph reused twice, or two FanOut branches sharing a name - collide in the checkpoint store
- * and silently replay each other's output. The fix is to key on a path ("pipeline/fan/security")
- * rather than a bare id. Not done yet; it changes the store schema, so it wants deciding alongside
- * question 3 (blob storage).
+ * Ids are path-qualified before they reach a store (see [[Path]]): `FanOut` branches by position,
+ * nested `Loop`/`Verify` bodies by ancestor id. Not fully: two children of one `Seq` sharing a
+ * literal id still collide in the checkpoint store and replay each other's output (CLAUDE.md, Open
+ * decisions).
  */
 opaque type NodeId = String
 

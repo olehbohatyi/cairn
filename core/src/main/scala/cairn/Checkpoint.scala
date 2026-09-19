@@ -74,8 +74,8 @@ object CheckpointSize:
  * Failures from a checkpoint backend.
  *
  * No `Throwable` case, per CLAUDE.md invariant #3 — which costs a real stack trace when a JDBC
- * driver throws. TODO(week 4): revisit when `store-postgres` lands; the likely answer is to log the
- * cause at the backend boundary and keep this channel structured.
+ * driver throws. `store-postgres` settles that as anticipated: the cause is logged with its stack
+ * trace at the backend boundary (`PostgresStore.typed`) and this channel stays structured.
  */
 enum StoreError:
   /**
